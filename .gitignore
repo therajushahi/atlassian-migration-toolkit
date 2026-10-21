@@ -1,0 +1,40 @@
+# Local secrets; only a dummy-value template may be committed.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
+tokens*.json
+
+# Real engagement inputs, exports and generated evidence stay private.
+/private/
+/customer-data/
+/local-data/
+/inventory/
+/inventories/
+/exports/
+/reports/
+/evidence/
+/migration-runs/
+/backups/
+*.private.*
+*.local.*
+*-inventory.json
+*-export.zip
+*-report.json
+*.dump
+*.bak
+*.log
+
+# Disposable scanner/runtime state; these do not imply an implemented runtime.
+.cache/
+.venv/
+venv/
+__pycache__/
+*.pyc
+node_modules/
+.coverage
+coverage/
+.pytest_cache/
+.DS_Store

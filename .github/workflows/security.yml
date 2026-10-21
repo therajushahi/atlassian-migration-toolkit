@@ -1,0 +1,99 @@
+name: Security
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository-security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        id: checkout
+        # Official release v7.0.1; pin verified against the GitHub tag metadata.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Prepare isolated scan outputs
+        run: |
+          mkdir -p "$RUNNER_TEMP/security-reports" "$RUNNER_TEMP/trivy-cache"
+          git rev-parse HEAD > "$RUNNER_TEMP/security-reports/reviewed-head.txt"
+
+      - name: Gitleaks working tree and fetched history
+        # Official v8.30.1 package: https://github.com/gitleaks/gitleaks/pkgs/container/gitleaks
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --tmpfs /tmp:rw,noexec,nosuid,size=256m \
+            --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -v "$RUNNER_TEMP/security-reports:/reports:rw" \
+            ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            dir /repo --redact=100 --no-banner --exit-code 1 \
+            --report-format json --report-path /reports/gitleaks-files.json
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --tmpfs /tmp:rw,noexec,nosuid,size=256m \
+            --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -v "$RUNNER_TEMP/security-reports:/reports:rw" \
+            ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            git /repo --log-opts=--all --redact=100 --no-banner --exit-code 1 \
+            --report-format json --report-path /reports/gitleaks-history.json
+
+      - name: Trivy filesystem vulnerability and configuration scan
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        # Official 0.76.0 package: https://github.com/aquasecurity/trivy/pkgs/container/trivy/1384780141?tag=0.76.0
+        run: |
+          docker run --rm --read-only --cap-drop ALL \
+            --tmpfs /tmp:rw,noexec,nosuid,size=256m \
+            --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -v "$RUNNER_TEMP/security-reports:/reports:rw" \
+            -v "$RUNNER_TEMP/trivy-cache:/cache:rw" \
+            ghcr.io/aquasecurity/trivy:0.76.0@sha256:2416d1f74045b57274df1a340eee6b510cacd73c66a6ccb8da092b117eb7d222 \
+            fs /repo --cache-dir /cache --scanners vuln,misconfig \
+            --skip-dirs /repo/.git --disable-telemetry --skip-version-check \
+            --severity HIGH,CRITICAL --exit-code 1 --no-progress \
+            --format json --output /reports/trivy.json
+
+      - name: Record docs-only applicability and stop if code gates are missing
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: |
+          git ls-files -- '*.py' '*.js' '*.jsx' '*.cjs' '*.mjs' '*.ts' '*.tsx' \
+            '*.go' '*.rs' '*.java' '*.kt' '*.cs' '*.rb' '*.php' '*.sh' \
+            'package.json' 'pyproject.toml' 'requirements*.txt' 'go.mod' \
+            'Cargo.toml' 'pom.xml' 'Dockerfile*' \
+            > "$RUNNER_TEMP/security-reports/code-gate-inputs.txt"
+          if test -s "$RUNNER_TEMP/security-reports/code-gate-inputs.txt"; then
+            printf '%s\n' 'BLOCKED: executable source, dependencies or a container build appeared. Configure the appropriate SAST, lint/build, unit/coverage and integration gates before merging.' \
+              | tee "$RUNNER_TEMP/security-reports/applicability.txt" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          printf '%s\n' \
+            'Current scope: documentation and repository configuration.' \
+            'SAST, unit/coverage, application integration, runtime and DAST: N/A; no application implementation or deployed target exists.' \
+            'Trivy can report no supported dependencies or IaC targets. That is scan coverage information, not application verification.' \
+            | tee "$RUNNER_TEMP/security-reports/applicability.txt" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload scan reports
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        # Official release v7.0.2; pin verified against the GitHub tag metadata.
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: security-reports
+          path: ${{ runner.temp }}/security-reports/
+          retention-days: 7
+          if-no-files-found: error
